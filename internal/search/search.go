@@ -42,7 +42,7 @@ func (s *Searcher) Search(queryVec []float32, layer string, k int) ([]Result, er
 	for i, vec := range vecs {
 		results[i] = Result{
 			ChunkID: ids[i],
-			Score:   cosineSimilarity(queryVec, vec),
+			Score:   CosineSimilarity(queryVec, vec),
 		}
 	}
 
@@ -126,8 +126,8 @@ func (s *Searcher) SearchMultiLayer(queryVecs map[string][]float32, weights map[
 	return combined[:k], nil
 }
 
-// cosineSimilarity calculates cosine similarity between two vectors.
-func cosineSimilarity(a, b []float32) float32 {
+// CosineSimilarity calculates cosine similarity between two vectors.
+func CosineSimilarity(a, b []float32) float32 {
 	if len(a) != len(b) {
 		// Pad shorter vector
 		if len(a) < len(b) {

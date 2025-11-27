@@ -1,5 +1,6 @@
 // GoRAGlite - Code-to-Code RAG Engine
 // A pure Go vector search engine for code, powered by SQLite.
+// Multi-layer vectorization: Structure + Lexical + Contextual
 package main
 
 import (
@@ -35,13 +36,14 @@ func main() {
 
 	case "search":
 		if len(os.Args) < 3 {
-			fmt.Println("usage: goraglite search <code-or-file> [--db=<dbpath>] [--k=10]")
+			fmt.Println("usage: goraglite search <code-or-file> [--db=<dbpath>] [--k=10] [--layer=final]")
 			os.Exit(1)
 		}
 		query := os.Args[2]
 		dbPath := getFlag("--db", "goraglite.db")
 		k := getFlagInt("--k", 10)
-		runSearch(query, dbPath, k)
+		layer := getFlag("--layer", "final")
+		runSearch(query, dbPath, k, layer)
 
 	case "stats":
 		dbPath := getFlag("--db", "goraglite.db")
@@ -57,6 +59,16 @@ func main() {
 		k := getFlagInt("--k", 5)
 		runSimilar(chunkID, dbPath, k)
 
+	case "compare":
+		if len(os.Args) < 4 {
+			fmt.Println("usage: goraglite compare <chunk-id-1> <chunk-id-2> [--db=<dbpath>]")
+			os.Exit(1)
+		}
+		id1 := getFlagInt64(os.Args[2], 0)
+		id2 := getFlagInt64(os.Args[3], 0)
+		dbPath := getFlag("--db", "goraglite.db")
+		runCompare(id1, id2, dbPath)
+
 	default:
 		usage()
 		os.Exit(1)
@@ -64,23 +76,31 @@ func main() {
 }
 
 func usage() {
-	fmt.Println(`GoRAGlite - Code-to-Code RAG Engine
+	fmt.Println(`GoRAGlite - Code-to-Code RAG Engine (Multi-Layer)
 
 Usage:
   goraglite index <path>              Index Go code from directory
   goraglite search <code-or-file>     Search for similar code
   goraglite similar <chunk-id>        Find chunks similar to a given chunk
+  goraglite compare <id1> <id2>       Compare two chunks layer by layer
   goraglite stats                     Show database statistics
 
 Options:
-  --db=<path>    Database file (default: goraglite.db)
-  --k=<n>        Number of results (default: 10)
+  --db=<path>      Database file (default: goraglite.db)
+  --k=<n>          Number of results (default: 10)
+  --layer=<name>   Layer to search: structure, lexical, final (default: final)
+
+Layers:
+  structure   AST-based structural similarity (code shape)
+  lexical     Identifier-based similarity (naming, vocabulary)
+  final       Blended vector (structure 60% + lexical 40%)
 
 Examples:
   goraglite index ./myproject
-  goraglite search "func (u *User) Validate() error"
-  goraglite search ./query.go
-  goraglite similar 42`)
+  goraglite search "func (u *User) Validate() error {}"
+  goraglite search ./query.go --layer=structure
+  goraglite similar 42
+  goraglite compare 1 2`)
 }
 
 func runIndex(path string, dbPath string) {
@@ -98,8 +118,8 @@ func runIndex(path string, dbPath string) {
 	// Create chunker
 	goChunker := chunker.NewGoChunker()
 
-	// Create vectorizer
-	vecStruct := vectorizer.NewStructureVectorizer(256)
+	// Create multi-layer blender
+	blender := vectorizer.NewBlender(vectorizer.DefaultBlendConfig())
 
 	// Chunk the codebase
 	var chunks []*chunker.Chunk
@@ -124,6 +144,10 @@ func runIndex(path string, dbPath string) {
 
 	fmt.Printf("📦 Found %d chunks\n", len(chunks))
 
+	// Build IDF for lexical layer
+	fmt.Printf("📊 Building vocabulary IDF...\n")
+	blender.Lexical.BuildIDF(chunks)
+
 	// Index each chunk
 	indexed := 0
 	for _, chunk := range chunks {
@@ -146,17 +170,18 @@ func runIndex(path string, dbPath string) {
 			continue
 		}
 
-		// Vectorize structure
-		vec := vecStruct.Vectorize(chunk)
+		// Vectorize all layers
+		layers, finalVec := blender.Vectorize(chunk)
 
-		// Store vector
-		if err := database.InsertVector(chunkID, "structure", vec); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: insert vector: %v\n", err)
-			continue
+		// Store each layer vector
+		for layerName, vec := range layers {
+			if err := database.InsertVector(chunkID, layerName, vec); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: insert %s vector: %v\n", layerName, err)
+			}
 		}
 
-		// For now, structure = final (single layer MVP)
-		if err := database.InsertVector(chunkID, "final", vec); err != nil {
+		// Store final blended vector
+		if err := database.InsertVector(chunkID, "final", finalVec); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: insert final vector: %v\n", err)
 			continue
 		}
@@ -170,9 +195,10 @@ func runIndex(path string, dbPath string) {
 	elapsed := time.Since(start)
 	fmt.Printf("✅ Indexed %d chunks in %v\n", indexed, elapsed.Round(time.Millisecond))
 	fmt.Printf("📁 Database: %s\n", dbPath)
+	fmt.Printf("🧬 Layers: structure (256d) + lexical (128d) → final (256d)\n")
 }
 
-func runSearch(query string, dbPath string, k int) {
+func runSearch(query string, dbPath string, k int, layer string) {
 	// Open database
 	database, err := db.Open(dbPath)
 	if err != nil {
@@ -195,6 +221,8 @@ func runSearch(query string, dbPath string, k int) {
 		queryCode = query
 		fmt.Printf("🔍 Searching for: %s\n", truncate(query, 60))
 	}
+
+	fmt.Printf("   Layer: %s\n", layer)
 
 	// Parse query as Go code
 	goChunker := chunker.NewGoChunker()
@@ -222,13 +250,24 @@ func runSearch(query string, dbPath string, k int) {
 		os.Exit(1)
 	}
 
-	// Vectorize first chunk from query
-	vecStruct := vectorizer.NewStructureVectorizer(256)
-	queryVec := vecStruct.Vectorize(queryChunks[0])
+	// Create blender and vectorize query
+	blender := vectorizer.NewBlender(vectorizer.DefaultBlendConfig())
+	layers, finalVec := blender.Vectorize(queryChunks[0])
+
+	// Select query vector based on layer
+	var queryVec []float32
+	switch layer {
+	case "structure":
+		queryVec = layers["structure"]
+	case "lexical":
+		queryVec = layers["lexical"]
+	default:
+		queryVec = finalVec
+	}
 
 	// Search
 	searcher := search.NewSearcher(database)
-	results, err := searcher.Search(queryVec, "final", k)
+	results, err := searcher.Search(queryVec, layer, k)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error searching: %v\n", err)
 		os.Exit(1)
@@ -304,6 +343,48 @@ func runSimilar(chunkID int64, dbPath string, k int) {
 	}
 }
 
+func runCompare(id1, id2 int64, dbPath string) {
+	database, err := db.Open(dbPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	defer database.Close()
+
+	chunk1, err := database.GetChunk(id1)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: chunk %d not found\n", id1)
+		os.Exit(1)
+	}
+	chunk2, err := database.GetChunk(id2)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: chunk %d not found\n", id2)
+		os.Exit(1)
+	}
+
+	fmt.Printf("🔬 Comparing chunks:\n")
+	fmt.Printf("   #%d: [%s] %s\n", id1, chunk1.ChunkType, chunk1.Name)
+	fmt.Printf("   #%d: [%s] %s\n", id2, chunk2.ChunkType, chunk2.Name)
+	fmt.Printf("\n")
+
+	layers := []string{"structure", "lexical", "final"}
+
+	for _, layer := range layers {
+		vec1, err1 := database.GetVector(id1, layer)
+		vec2, err2 := database.GetVector(id2, layer)
+
+		if err1 != nil || err2 != nil {
+			continue
+		}
+
+		score := search.CosineSimilarity(vec1, vec2)
+		bar := strings.Repeat("█", int(score*20))
+		pad := strings.Repeat("░", 20-int(score*20))
+
+		fmt.Printf("   %-12s %s%s %.4f\n", layer+":", bar, pad, score)
+	}
+}
+
 func runStats(dbPath string) {
 	database, err := db.Open(dbPath)
 	if err != nil {
@@ -317,7 +398,8 @@ func runStats(dbPath string) {
 	fmt.Printf("📊 GoRAGlite Database Stats\n")
 	fmt.Printf("   Database: %s\n", dbPath)
 	fmt.Printf("   Chunks:   %d\n", chunks)
-	fmt.Printf("   Vectors:  %d\n", vectors)
+	fmt.Printf("   Vectors:  %d (per layer)\n", vectors)
+	fmt.Printf("   Layers:   structure, lexical, final\n")
 }
 
 // Helper functions
