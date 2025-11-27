@@ -4,7 +4,7 @@
 *.dll
 *.so
 *.dylib
-goraglite
+/goraglite
 
 # Test binary
 *.test
