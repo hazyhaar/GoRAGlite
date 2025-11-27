@@ -76,10 +76,10 @@ func main() {
 }
 
 func usage() {
-	fmt.Println(`GoRAGlite - Code-to-Code RAG Engine (Multi-Layer)
+	fmt.Println(`GoRAGlite - Code-to-Code RAG Engine (Multi-Layer, Multi-Language)
 
 Usage:
-  goraglite index <path>              Index Go code from directory
+  goraglite index <path>              Index code from directory (Go, SQL, Bash)
   goraglite search <code-or-file>     Search for similar code
   goraglite similar <chunk-id>        Find chunks similar to a given chunk
   goraglite compare <id1> <id2>       Compare two chunks layer by layer
@@ -89,6 +89,12 @@ Options:
   --db=<path>      Database file (default: goraglite.db)
   --k=<n>          Number of results (default: 10)
   --layer=<name>   Layer to search: structure, lexical, contextual, final (default: final)
+  --lang=<name>    Language for search query: go, sql, bash (default: auto-detect)
+
+Languages supported:
+  go      Go source files (.go)
+  sql     SQL files (.sql)
+  bash    Shell scripts (.sh, .bash, .zsh, shebang)
 
 Layers:
   structure   AST-based structural similarity (code shape, patterns)
@@ -99,13 +105,14 @@ Layers:
 Examples:
   goraglite index ./myproject
   goraglite search "func (u *User) Validate() error {}"
-  goraglite search ./query.go --layer=structure
+  goraglite search "SELECT * FROM users WHERE id = ?" --lang=sql
+  goraglite search ./deploy.sh --layer=structure
   goraglite similar 42
   goraglite compare 1 2`)
 }
 
 func runIndex(path string, dbPath string) {
-	fmt.Printf("🔍 Indexing Go code from: %s\n", path)
+	fmt.Printf("🔍 Indexing code from: %s\n", path)
 	start := time.Now()
 
 	// Open database
@@ -116,8 +123,8 @@ func runIndex(path string, dbPath string) {
 	}
 	defer database.Close()
 
-	// Create chunker
-	goChunker := chunker.NewGoChunker()
+	// Create multi-language chunker
+	multiChunker := chunker.NewMultiChunker()
 
 	// Create multi-layer blender
 	blender := vectorizer.NewBlender(vectorizer.DefaultBlendConfig())
@@ -133,9 +140,9 @@ func runIndex(path string, dbPath string) {
 	}
 
 	if info.IsDir() {
-		chunks, chunkerErr = goChunker.ChunkDir(path)
+		chunks, chunkerErr = multiChunker.ChunkDir(path)
 	} else {
-		chunks, chunkerErr = goChunker.ChunkFile(path)
+		chunks, chunkerErr = multiChunker.ChunkFile(path)
 	}
 
 	if chunkerErr != nil {
@@ -208,8 +215,12 @@ func runSearch(query string, dbPath string, k int, layer string) {
 	}
 	defer database.Close()
 
+	// Detect language from flag or file extension
+	lang := getFlag("--lang", "")
+
 	// Check if query is a file
 	var queryCode string
+	var queryPath string
 	if _, err := os.Stat(query); err == nil {
 		content, err := os.ReadFile(query)
 		if err != nil {
@@ -217,37 +228,60 @@ func runSearch(query string, dbPath string, k int, layer string) {
 			os.Exit(1)
 		}
 		queryCode = string(content)
-		fmt.Printf("🔍 Searching for code similar to: %s\n", query)
+		queryPath = query
+		if lang == "" {
+			lang = chunker.DetectLanguage(query)
+		}
+		fmt.Printf("🔍 Searching for code similar to: %s (%s)\n", query, lang)
 	} else {
 		queryCode = query
 		fmt.Printf("🔍 Searching for: %s\n", truncate(query, 60))
+		// Auto-detect language from content if not specified
+		if lang == "" {
+			lang = detectLanguageFromContent(queryCode)
+		}
+		fmt.Printf("   Language: %s\n", lang)
 	}
 
 	fmt.Printf("   Layer: %s\n", layer)
 
-	// Parse query as Go code
-	goChunker := chunker.NewGoChunker()
+	// Parse query based on language
+	var queryChunks []*chunker.Chunk
 
-	// Create a temporary file for parsing
-	tmpDir := os.TempDir()
-	tmpFile := filepath.Join(tmpDir, "goraglite_query.go")
+	switch lang {
+	case "sql":
+		sqlChunker := chunker.NewSQLChunker()
+		queryChunks, err = sqlChunker.ChunkContent("query.sql", queryCode)
+	case "bash", "sh", "shell":
+		bashChunker := chunker.NewBashChunker()
+		queryChunks, err = bashChunker.ChunkContent("query.sh", queryCode)
+	default:
+		// Default to Go
+		goChunker := chunker.NewGoChunker()
+		tmpDir := os.TempDir()
+		tmpFile := filepath.Join(tmpDir, "goraglite_query.go")
 
-	// Wrap query if needed
-	wrappedCode := queryCode
-	if !strings.Contains(queryCode, "package") {
-		wrappedCode = "package query\n\n" + queryCode
+		// Wrap query if needed
+		wrappedCode := queryCode
+		if !strings.Contains(queryCode, "package") {
+			wrappedCode = "package query\n\n" + queryCode
+		}
+
+		if err := os.WriteFile(tmpFile, []byte(wrappedCode), 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		defer os.Remove(tmpFile)
+
+		queryChunks, err = goChunker.ChunkFile(tmpFile)
+		if queryPath != "" {
+			os.Remove(tmpFile)
+		}
 	}
 
-	if err := os.WriteFile(tmpFile, []byte(wrappedCode), 0644); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-	defer os.Remove(tmpFile)
-
-	queryChunks, err := goChunker.ChunkFile(tmpFile)
 	if err != nil || len(queryChunks) == 0 {
-		fmt.Fprintf(os.Stderr, "error parsing query as Go code: %v\n", err)
-		fmt.Println("Hint: query should be valid Go code (function, type, etc.)")
+		fmt.Fprintf(os.Stderr, "error parsing query as %s code: %v\n", lang, err)
+		fmt.Println("Hint: query should be valid code for the detected/specified language")
 		os.Exit(1)
 	}
 
@@ -452,4 +486,48 @@ func indent(s string, prefix string) string {
 		lines[i] = prefix + line
 	}
 	return strings.Join(lines, "\n")
+}
+
+// detectLanguageFromContent tries to detect the language from code content.
+func detectLanguageFromContent(code string) string {
+	upper := strings.ToUpper(code)
+
+	// SQL patterns
+	sqlKeywords := []string{"SELECT ", "INSERT ", "UPDATE ", "DELETE ", "CREATE TABLE", "ALTER TABLE", "DROP TABLE", "FROM ", "WHERE ", "JOIN "}
+	sqlScore := 0
+	for _, kw := range sqlKeywords {
+		if strings.Contains(upper, kw) {
+			sqlScore++
+		}
+	}
+	if sqlScore >= 2 {
+		return "sql"
+	}
+
+	// Bash patterns
+	bashPatterns := []string{"#!/bin/", "#!/usr/bin/env", "if [", "for ", "while ", "done", "fi", "esac", "then", "${", "$(",}
+	bashScore := 0
+	for _, p := range bashPatterns {
+		if strings.Contains(code, p) {
+			bashScore++
+		}
+	}
+	if bashScore >= 2 || strings.HasPrefix(code, "#!") {
+		return "bash"
+	}
+
+	// Go patterns
+	goPatterns := []string{"func ", "package ", "import ", "type ", "struct {", "interface {", ":= ", "go ", "defer "}
+	goScore := 0
+	for _, p := range goPatterns {
+		if strings.Contains(code, p) {
+			goScore++
+		}
+	}
+	if goScore >= 2 {
+		return "go"
+	}
+
+	// Default to Go
+	return "go"
 }

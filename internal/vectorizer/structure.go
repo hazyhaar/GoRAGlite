@@ -39,16 +39,23 @@ func (v *StructureVectorizer) Vectorize(chunk *chunker.Chunk) []float32 {
 	// Feature Group 2: AST bigrams (node sequences)
 	v.addASTBigrams(vec, chunk.ASTNodes, v.Dims/4, v.Dims/4)
 
-	// Feature Group 3: Control flow patterns
+	// Feature Group 3: Control flow patterns (language-aware)
 	v.addControlFlowFeatures(vec, chunk.ASTNodes, v.Dims/2, v.Dims/8)
 
-	// Feature Group 4: Go idioms & patterns
-	v.addGoIdiomFeatures(vec, chunk, v.Dims/2+v.Dims/8, v.Dims/8)
+	// Feature Group 4: Language-specific idioms & patterns
+	switch chunk.Language {
+	case "sql":
+		v.addSQLIdiomFeatures(vec, chunk, v.Dims/2+v.Dims/8, v.Dims/8)
+	case "bash", "sh", "shell":
+		v.addBashIdiomFeatures(vec, chunk, v.Dims/2+v.Dims/8, v.Dims/8)
+	default:
+		v.addGoIdiomFeatures(vec, chunk, v.Dims/2+v.Dims/8, v.Dims/8)
+	}
 
 	// Feature Group 5: Structural metrics
 	v.addStructuralMetrics(vec, chunk, v.Dims-48, 32)
 
-	// Feature Group 6: Chunk type encoding
+	// Feature Group 6: Chunk type encoding (language-aware)
 	v.addChunkTypeFeatures(vec, chunk.Type, v.Dims-16, 16)
 
 	// Normalize to unit vector
@@ -378,6 +385,154 @@ func countEarlyReturns(nodes []chunker.ASTNode) int {
 		}
 	}
 	return count
+}
+
+// addSQLIdiomFeatures detects SQL-specific patterns.
+func (v *StructureVectorizer) addSQLIdiomFeatures(vec []float32, chunk *chunker.Chunk, offset, dims int) {
+	content := strings.ToUpper(chunk.Content)
+
+	idioms := map[string]float32{
+		// Query patterns
+		"select_star":     float32(strings.Count(content, "SELECT *")),
+		"select_distinct": float32(strings.Count(content, "DISTINCT")),
+		"subquery":        float32(strings.Count(content, "(SELECT")),
+		"cte_with":        float32(boolToInt(strings.HasPrefix(strings.TrimSpace(content), "WITH"))),
+
+		// Join patterns
+		"inner_join":   float32(strings.Count(content, "INNER JOIN")),
+		"left_join":    float32(strings.Count(content, "LEFT JOIN") + strings.Count(content, "LEFT OUTER")),
+		"right_join":   float32(strings.Count(content, "RIGHT JOIN")),
+		"cross_join":   float32(strings.Count(content, "CROSS JOIN")),
+		"self_join":    float32(boolToInt(strings.Count(content, "JOIN") > 1 && strings.Count(content, "AS ") > 1)),
+		"multi_join":   float32(boolToInt(strings.Count(content, "JOIN") >= 3)),
+
+		// Aggregation patterns
+		"group_by":     float32(strings.Count(content, "GROUP BY")),
+		"having":       float32(strings.Count(content, "HAVING")),
+		"count_agg":    float32(strings.Count(content, "COUNT(")),
+		"sum_agg":      float32(strings.Count(content, "SUM(")),
+		"avg_agg":      float32(strings.Count(content, "AVG(")),
+		"window_func":  float32(strings.Count(content, "OVER(")),
+
+		// Condition patterns
+		"where_in":     float32(strings.Count(content, " IN (")),
+		"where_like":   float32(strings.Count(content, " LIKE ")),
+		"where_between":float32(strings.Count(content, " BETWEEN ")),
+		"null_check":   float32(strings.Count(content, "IS NULL") + strings.Count(content, "IS NOT NULL")),
+		"exists_check": float32(strings.Count(content, "EXISTS(")),
+		"case_when":    float32(strings.Count(content, "CASE WHEN")),
+
+		// DML patterns
+		"insert_values":    float32(strings.Count(content, "INSERT INTO") * boolToInt(strings.Contains(content, "VALUES"))),
+		"insert_select":    float32(strings.Count(content, "INSERT INTO") * boolToInt(strings.Contains(content, "SELECT"))),
+		"update_set":       float32(strings.Count(content, "UPDATE") * boolToInt(strings.Contains(content, "SET"))),
+		"upsert":           float32(strings.Count(content, "ON CONFLICT") + strings.Count(content, "ON DUPLICATE")),
+		"returning":        float32(strings.Count(content, "RETURNING")),
+
+		// DDL patterns
+		"create_table":     float32(strings.Count(content, "CREATE TABLE")),
+		"create_index":     float32(strings.Count(content, "CREATE INDEX") + strings.Count(content, "CREATE UNIQUE INDEX")),
+		"foreign_key":      float32(strings.Count(content, "FOREIGN KEY") + strings.Count(content, "REFERENCES")),
+		"cascade":          float32(strings.Count(content, "CASCADE")),
+
+		// Safety patterns
+		"transaction":      float32(strings.Count(content, "BEGIN") + strings.Count(content, "COMMIT") + strings.Count(content, "ROLLBACK")),
+		"delete_where":     float32(strings.Count(content, "DELETE FROM") * boolToInt(strings.Contains(content, "WHERE"))),
+		"update_where":     float32(strings.Count(content, "UPDATE") * boolToInt(strings.Contains(content, "WHERE"))),
+	}
+
+	i := 0
+	for name, count := range idioms {
+		if i >= dims {
+			break
+		}
+		idx := offset + (v.hash("sql_idiom:"+name) % dims)
+		vec[idx] += sigmoid(count / 2.0)
+		i++
+	}
+}
+
+// addBashIdiomFeatures detects Bash-specific patterns.
+func (v *StructureVectorizer) addBashIdiomFeatures(vec []float32, chunk *chunker.Chunk, offset, dims int) {
+	content := chunk.Content
+
+	idioms := map[string]float32{
+		// Variable patterns
+		"var_assign":       float32(strings.Count(content, "=") - strings.Count(content, "==") - strings.Count(content, "!=")),
+		"local_var":        float32(strings.Count(content, "local ")),
+		"export_var":       float32(strings.Count(content, "export ")),
+		"readonly_var":     float32(strings.Count(content, "readonly ")),
+		"param_expansion":  float32(strings.Count(content, "${")),
+		"default_value":    float32(strings.Count(content, ":-") + strings.Count(content, ":=")),
+		"string_replace":   float32(strings.Count(content, "${") * boolToInt(strings.Contains(content, "/"))),
+
+		// Command patterns
+		"pipe":             float32(strings.Count(content, "|") - strings.Count(content, "||")),
+		"and_list":         float32(strings.Count(content, "&&")),
+		"or_list":          float32(strings.Count(content, "||")),
+		"cmd_subst_dollar": float32(strings.Count(content, "$(")),
+		"cmd_subst_back":   float32(strings.Count(content, "`")),
+		"background":       float32(strings.Count(content, "&") - strings.Count(content, "&&") - strings.Count(content, ">&")),
+
+		// Redirection patterns
+		"stdout_file":      float32(strings.Count(content, ">") - strings.Count(content, ">>") - strings.Count(content, ">&") - strings.Count(content, "<")),
+		"stdout_append":    float32(strings.Count(content, ">>")),
+		"stdin_file":       float32(strings.Count(content, "<") - strings.Count(content, "<<") - strings.Count(content, "<(")),
+		"heredoc":          float32(strings.Count(content, "<<")),
+		"stderr_redirect":  float32(strings.Count(content, "2>") + strings.Count(content, "2>&1") + strings.Count(content, "&>")),
+		"process_subst":    float32(strings.Count(content, "<(") + strings.Count(content, ">(")),
+
+		// Control flow
+		"if_then":          float32(strings.Count(content, "if ") + strings.Count(content, "if[")),
+		"elif_then":        float32(strings.Count(content, "elif ")),
+		"for_loop":         float32(strings.Count(content, "for ")),
+		"while_loop":       float32(strings.Count(content, "while ")),
+		"until_loop":       float32(strings.Count(content, "until ")),
+		"case_stmt":        float32(strings.Count(content, "case ")),
+		"select_stmt":      float32(strings.Count(content, "select ")),
+
+		// Test patterns
+		"test_bracket":     float32(strings.Count(content, "[ ")),
+		"test_double":      float32(strings.Count(content, "[[ ")),
+		"test_file":        float32(strings.Count(content, "-f ") + strings.Count(content, "-d ") + strings.Count(content, "-e ")),
+		"test_string":      float32(strings.Count(content, "-z ") + strings.Count(content, "-n ")),
+		"test_numeric":     float32(strings.Count(content, "-eq ") + strings.Count(content, "-ne ") + strings.Count(content, "-lt ") + strings.Count(content, "-gt ")),
+		"regex_match":      float32(strings.Count(content, "=~")),
+
+		// Error handling
+		"exit_code":        float32(strings.Count(content, "$?")),
+		"set_e":            float32(strings.Count(content, "set -e")),
+		"set_u":            float32(strings.Count(content, "set -u")),
+		"set_o":            float32(strings.Count(content, "set -o")),
+		"trap_signal":      float32(strings.Count(content, "trap ")),
+		"exit_stmt":        float32(strings.Count(content, "exit ")),
+		"return_stmt":      float32(strings.Count(content, "return ")),
+
+		// Array patterns
+		"array_decl":       float32(strings.Count(content, "=(")),
+		"array_access":     float32(strings.Count(content, "[@]") + strings.Count(content, "[*]")),
+		"array_length":     float32(strings.Count(content, "${#")),
+
+		// Common commands
+		"echo_cmd":         float32(strings.Count(content, "echo ")),
+		"printf_cmd":       float32(strings.Count(content, "printf ")),
+		"read_cmd":         float32(strings.Count(content, "read ")),
+		"cd_cmd":           float32(strings.Count(content, "cd ")),
+		"source_cmd":       float32(strings.Count(content, "source ") + strings.Count(content, ". ")),
+
+		// Functions
+		"func_decl":        float32(boolToInt(strings.Contains(content, "() {") || strings.Contains(content, "function "))),
+	}
+
+	i := 0
+	for name, count := range idioms {
+		if i >= dims {
+			break
+		}
+		idx := offset + (v.hash("bash_idiom:"+name) % dims)
+		vec[idx] += sigmoid(count / 2.0)
+		i++
+	}
 }
 
 func boolToInt(b bool) int {
