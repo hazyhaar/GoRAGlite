@@ -88,12 +88,13 @@ Usage:
 Options:
   --db=<path>      Database file (default: goraglite.db)
   --k=<n>          Number of results (default: 10)
-  --layer=<name>   Layer to search: structure, lexical, final (default: final)
+  --layer=<name>   Layer to search: structure, lexical, contextual, final (default: final)
 
 Layers:
-  structure   AST-based structural similarity (code shape)
-  lexical     Identifier-based similarity (naming, vocabulary)
-  final       Blended vector (structure 60% + lexical 40%)
+  structure   AST-based structural similarity (code shape, patterns)
+  lexical     Identifier-based similarity (naming, vocabulary, domain)
+  contextual  Call graph relationships (who calls whom)
+  final       Blended vector (structure 45% + lexical 30% + contextual 25%)
 
 Examples:
   goraglite index ./myproject
@@ -144,9 +145,9 @@ func runIndex(path string, dbPath string) {
 
 	fmt.Printf("📦 Found %d chunks\n", len(chunks))
 
-	// Build IDF for lexical layer
-	fmt.Printf("📊 Building vocabulary IDF...\n")
-	blender.Lexical.BuildIDF(chunks)
+	// Build corpus-level features (IDF, call graph, etc.)
+	fmt.Printf("📊 Building corpus features (IDF, call graph)...\n")
+	blender.BuildCorpus(chunks)
 
 	// Index each chunk
 	indexed := 0
@@ -195,7 +196,7 @@ func runIndex(path string, dbPath string) {
 	elapsed := time.Since(start)
 	fmt.Printf("✅ Indexed %d chunks in %v\n", indexed, elapsed.Round(time.Millisecond))
 	fmt.Printf("📁 Database: %s\n", dbPath)
-	fmt.Printf("🧬 Layers: structure (256d) + lexical (128d) → final (256d)\n")
+	fmt.Printf("🧬 Layers: structure (256d) + lexical (128d) + contextual (128d) → final (256d)\n")
 }
 
 func runSearch(query string, dbPath string, k int, layer string) {
@@ -261,6 +262,12 @@ func runSearch(query string, dbPath string, k int, layer string) {
 		queryVec = layers["structure"]
 	case "lexical":
 		queryVec = layers["lexical"]
+	case "contextual":
+		queryVec = layers["contextual"]
+		if queryVec == nil {
+			// Contextual not available for query, use final
+			queryVec = finalVec
+		}
 	default:
 		queryVec = finalVec
 	}
@@ -367,7 +374,7 @@ func runCompare(id1, id2 int64, dbPath string) {
 	fmt.Printf("   #%d: [%s] %s\n", id2, chunk2.ChunkType, chunk2.Name)
 	fmt.Printf("\n")
 
-	layers := []string{"structure", "lexical", "final"}
+	layers := []string{"structure", "lexical", "contextual", "final"}
 
 	for _, layer := range layers {
 		vec1, err1 := database.GetVector(id1, layer)
@@ -399,7 +406,7 @@ func runStats(dbPath string) {
 	fmt.Printf("   Database: %s\n", dbPath)
 	fmt.Printf("   Chunks:   %d\n", chunks)
 	fmt.Printf("   Vectors:  %d (per layer)\n", vectors)
-	fmt.Printf("   Layers:   structure, lexical, final\n")
+	fmt.Printf("   Layers:   structure (256d), lexical (128d), contextual (128d), final (256d)\n")
 }
 
 // Helper functions

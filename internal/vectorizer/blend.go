@@ -18,18 +18,19 @@ type Layer struct {
 
 // BlendConfig defines how to combine multiple vector layers.
 type BlendConfig struct {
-	Layers      []Layer
-	OutputDims  int
-	Normalize   bool
-	Method      string // "weighted", "concat", "attention"
+	Layers     []Layer
+	OutputDims int
+	Normalize  bool
+	Method     string // "weighted", "concat", "attention"
 }
 
 // DefaultBlendConfig returns the default blend configuration.
 func DefaultBlendConfig() BlendConfig {
 	return BlendConfig{
 		Layers: []Layer{
-			{Name: "structure", Weight: 0.6, Dims: 256},
-			{Name: "lexical", Weight: 0.4, Dims: 128},
+			{Name: "structure", Weight: 0.45, Dims: 256},
+			{Name: "lexical", Weight: 0.30, Dims: 128},
+			{Name: "contextual", Weight: 0.25, Dims: 128},
 		},
 		OutputDims: 256,
 		Normalize:  true,
@@ -42,15 +43,27 @@ type Blender struct {
 	Config     BlendConfig
 	Structure  *StructureVectorizer
 	Lexical    *LexicalVectorizer
+	Contextual *ContextualVectorizer
+
+	// Corpus built flag
+	corpusBuilt bool
 }
 
 // NewBlender creates a new multi-layer blender.
 func NewBlender(config BlendConfig) *Blender {
 	return &Blender{
-		Config:    config,
-		Structure: NewStructureVectorizer(256),
-		Lexical:   NewLexicalVectorizer(128),
+		Config:     config,
+		Structure:  NewStructureVectorizer(256),
+		Lexical:    NewLexicalVectorizer(128),
+		Contextual: NewContextualVectorizer(128),
 	}
+}
+
+// BuildCorpus builds corpus-level features (IDF, call graph, etc.)
+func (b *Blender) BuildCorpus(chunks []*chunker.Chunk) {
+	b.Lexical.BuildIDF(chunks)
+	b.Contextual.BuildCorpus(chunks)
+	b.corpusBuilt = true
 }
 
 // Vectorize generates all layer vectors and blends them.
@@ -60,6 +73,11 @@ func (b *Blender) Vectorize(chunk *chunker.Chunk) (map[string][]float32, []float
 	// Generate each layer
 	layers["structure"] = b.Structure.Vectorize(chunk)
 	layers["lexical"] = b.Lexical.Vectorize(chunk)
+
+	// Contextual layer (only if corpus was built)
+	if b.corpusBuilt {
+		layers["contextual"] = b.Contextual.Vectorize(chunk)
+	}
 
 	// Blend based on method
 	var final []float32
@@ -193,9 +211,9 @@ func (b *Blender) VectorizeWithContext(chunk *chunker.Chunk, context *BlendConte
 
 // BlendContext provides context for dynamic weight computation.
 type BlendContext struct {
-	QueryType     string             // "structural", "semantic", "mixed"
-	LayerScores   map[string]float32 // Previous search scores per layer
-	UserWeights   map[string]float32 // User-specified weights
+	QueryType   string             // "structural", "semantic", "relational", "mixed"
+	LayerScores map[string]float32 // Previous search scores per layer
+	UserWeights map[string]float32 // User-specified weights
 }
 
 // computeContextualWeights computes dynamic weights based on context.
@@ -223,9 +241,15 @@ func (b *Blender) computeContextualWeights(layers map[string][]float32, context 
 	case "structural":
 		weights["structure"] *= 1.5
 		weights["lexical"] *= 0.5
+		weights["contextual"] *= 0.8
 	case "semantic":
 		weights["structure"] *= 0.5
 		weights["lexical"] *= 1.5
+		weights["contextual"] *= 0.8
+	case "relational":
+		weights["structure"] *= 0.6
+		weights["lexical"] *= 0.6
+		weights["contextual"] *= 1.8
 	}
 
 	// Adjust based on previous layer scores (feedback loop)
@@ -266,7 +290,6 @@ func (b *Blender) GetWeightsJSON() string {
 // Helper functions
 
 // project projects a vector to target dimensions.
-// Uses simple linear projection (averaging or padding).
 func project(vec []float32, targetDims int) []float32 {
 	if len(vec) == targetDims {
 		return vec
@@ -275,10 +298,8 @@ func project(vec []float32, targetDims int) []float32 {
 	result := make([]float32, targetDims)
 
 	if len(vec) < targetDims {
-		// Pad with zeros (already done by make)
 		copy(result, vec)
 	} else {
-		// Downsample by averaging bins
 		binSize := float32(len(vec)) / float32(targetDims)
 		for i := 0; i < targetDims; i++ {
 			start := int(float32(i) * binSize)
@@ -309,7 +330,6 @@ func l2Norm(vec []float32) float32 {
 // CrossCorrelation computes correlation between two layers.
 func CrossCorrelation(a, b []float32) float32 {
 	if len(a) != len(b) {
-		// Project to same size
 		minLen := len(a)
 		if len(b) < minLen {
 			minLen = len(b)
@@ -318,7 +338,6 @@ func CrossCorrelation(a, b []float32) float32 {
 		b = project(b, minLen)
 	}
 
-	// Compute Pearson correlation
 	var sumA, sumB, sumAB, sumA2, sumB2 float64
 	n := float64(len(a))
 

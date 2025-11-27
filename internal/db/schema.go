@@ -44,6 +44,14 @@ CREATE TABLE IF NOT EXISTS vectors_lexical (
     FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
 );
 
+-- Vecteurs contextuels (graphe d'appels)
+CREATE TABLE IF NOT EXISTS vectors_contextual (
+    chunk_id INTEGER PRIMARY KEY,
+    vector BLOB NOT NULL,
+    dims INTEGER NOT NULL,
+    FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+);
+
 -- Vecteur final fusionné (pour recherche rapide)
 CREATE TABLE IF NOT EXISTS vectors_final (
     chunk_id INTEGER PRIMARY KEY,
