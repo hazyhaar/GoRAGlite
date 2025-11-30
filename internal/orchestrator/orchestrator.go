@@ -93,8 +93,9 @@ func defaultWorkflowMap() map[string]string {
 }
 
 // Ingest imports a file into the corpus.
+// HOROS: Files are copied to external storage, not stored as BLOB.
 func (o *Orchestrator) Ingest(ctx context.Context, path string) (string, error) {
-	// Read file
+	// Open file for hashing
 	file, err := os.Open(path)
 	if err != nil {
 		return "", fmt.Errorf("open file: %w", err)
@@ -107,18 +108,13 @@ func (o *Orchestrator) Ingest(ctx context.Context, path string) (string, error) 
 		return "", fmt.Errorf("stat file: %w", err)
 	}
 
-	// Read content
-	content, err := io.ReadAll(file)
-	if err != nil {
-		return "", fmt.Errorf("read file: %w", err)
+	// Calculate hash (content ID) - stream to avoid loading entire file
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, file); err != nil {
+		return "", fmt.Errorf("hash file: %w", err)
 	}
-
-	// Calculate hash (content ID)
-	hash := sha256.Sum256(content)
-	id := hex.EncodeToString(hash[:])
-
-	// Detect MIME type
-	mimeType := detectMimeType(path, content)
+	checksum := hex.EncodeToString(hasher.Sum(nil))
+	id := checksum // Use checksum as ID
 
 	// Check if already exists
 	var existingID string
@@ -129,12 +125,32 @@ func (o *Orchestrator) Ingest(ctx context.Context, path string) (string, error) 
 		return id, nil // Already ingested
 	}
 
-	// Insert into corpus
+	// Read a small portion for MIME detection
+	file.Seek(0, io.SeekStart)
+	header := make([]byte, 512)
+	n, _ := file.Read(header)
+	mimeType := detectMimeType(path, header[:n])
+
+	// HOROS: Copy file to external storage (cp/rm compatible)
+	// Storage layout: {dataDir}/storage/raw/{hash[0:2]}/{hash}
+	storageDir := filepath.Join(o.dataDir, "storage", "raw", checksum[:2])
+	if err := os.MkdirAll(storageDir, 0755); err != nil {
+		return "", fmt.Errorf("create storage dir: %w", err)
+	}
+
+	externalPath := filepath.Join(storageDir, checksum)
+	if err := copyFile(path, externalPath); err != nil {
+		return "", fmt.Errorf("copy to storage: %w", err)
+	}
+
+	// Insert into corpus (external_path instead of content BLOB)
 	_, err = o.corpusDB.ExecContext(ctx, `
-		INSERT INTO raw_files (id, source_path, mime_type, size, content, checksum, status)
+		INSERT INTO raw_files (id, source_path, mime_type, size, external_path, checksum, status)
 		VALUES (?, ?, ?, ?, ?, ?, 'pending')
-	`, id, path, mimeType, info.Size(), content, id)
+	`, id, path, mimeType, info.Size(), externalPath, checksum)
 	if err != nil {
+		// Clean up copied file on failure
+		os.Remove(externalPath)
 		return "", fmt.Errorf("insert file: %w", err)
 	}
 
@@ -142,9 +158,31 @@ func (o *Orchestrator) Ingest(ctx context.Context, path string) (string, error) 
 	o.corpusDB.ExecContext(ctx, `
 		INSERT INTO audit_log (actor, action, target, details)
 		VALUES ('orchestrator', 'ingest', ?, ?)
-	`, id, fmt.Sprintf(`{"path":"%s","mime":"%s","size":%d}`, path, mimeType, info.Size()))
+	`, id, fmt.Sprintf(`{"path":"%s","external_path":"%s","mime":"%s","size":%d}`, path, externalPath, mimeType, info.Size()))
 
 	return id, nil
+}
+
+// copyFile copies a file from src to dst.
+// HOROS: Simple cp operation for Data-Physics law compliance.
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+
+	return out.Sync()
 }
 
 // IngestDir imports all files from a directory.

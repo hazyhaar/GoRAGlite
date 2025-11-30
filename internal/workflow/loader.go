@@ -2,17 +2,13 @@ package workflow
 
 import (
 	"context"
-	"embed"
+	"database/sql"
 	"fmt"
-	"io/fs"
-	"path/filepath"
 	"strings"
 
+	"goraglite/assets"
 	"goraglite/internal/db"
 )
-
-//go:embed ../../sql/workflows/*.sql
-var workflowsFS embed.FS
 
 // Loader loads workflow definitions from SQL files.
 type Loader struct {
@@ -25,8 +21,9 @@ func NewLoader(workflowsDB *db.DB) *Loader {
 }
 
 // LoadBuiltins loads all built-in workflow definitions.
+// Uses assets package (HOROS compliant - no ".." in embed path)
 func (l *Loader) LoadBuiltins(ctx context.Context) error {
-	entries, err := workflowsFS.ReadDir("../../sql/workflows")
+	entries, err := assets.WorkflowsFS.ReadDir("workflows")
 	if err != nil {
 		return fmt.Errorf("read workflows dir: %w", err)
 	}
@@ -36,8 +33,8 @@ func (l *Loader) LoadBuiltins(ctx context.Context) error {
 			continue
 		}
 
-		path := filepath.Join("../../sql/workflows", entry.Name())
-		content, err := workflowsFS.ReadFile(path)
+		path := fmt.Sprintf("workflows/%s", entry.Name())
+		content, err := assets.WorkflowsFS.ReadFile(path)
 		if err != nil {
 			return fmt.Errorf("read workflow file %s: %w", entry.Name(), err)
 		}
@@ -50,9 +47,10 @@ func (l *Loader) LoadBuiltins(ctx context.Context) error {
 	return nil
 }
 
-// LoadFromFile loads a workflow definition from a file.
-func (l *Loader) LoadFromFile(ctx context.Context, path string) error {
-	content, err := fs.ReadFile(workflowsFS, path)
+// LoadFromFile loads a workflow definition from an embedded file.
+func (l *Loader) LoadFromFile(ctx context.Context, filename string) error {
+	path := fmt.Sprintf("workflows/%s", filename)
+	content, err := assets.WorkflowsFS.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read workflow file: %w", err)
 	}
@@ -158,7 +156,7 @@ func (l *Loader) DeprecateWorkflow(ctx context.Context, workflowID string) error
 
 // DeleteWorkflow removes a workflow and its steps.
 func (l *Loader) DeleteWorkflow(ctx context.Context, workflowID string) error {
-	return l.db.Transaction(ctx, func(tx *db.Tx) error {
+	return l.db.Transaction(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM workflow_tags WHERE workflow_id = ?", workflowID); err != nil {
 			return err
 		}
@@ -174,7 +172,7 @@ func (l *Loader) DeleteWorkflow(ctx context.Context, workflowID string) error {
 
 // CloneWorkflow creates a copy of a workflow with a new ID.
 func (l *Loader) CloneWorkflow(ctx context.Context, sourceID, newID, newName string) error {
-	return l.db.Transaction(ctx, func(tx *db.Tx) error {
+	return l.db.Transaction(ctx, func(tx *sql.Tx) error {
 		// Clone workflow
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO workflows (id, name, version, description, input_schema, output_schema, status, created_at, updated_at)
@@ -211,6 +209,3 @@ func (l *Loader) CloneWorkflow(ctx context.Context, sourceID, newID, newName str
 		return nil
 	})
 }
-
-// Tx wraps a database transaction for workflow operations.
-type Tx = db.Tx
