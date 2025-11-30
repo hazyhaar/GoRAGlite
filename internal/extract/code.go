@@ -362,7 +362,7 @@ func (p *JavaScriptParser) Parse(content []byte) ([]CodeBlock, error) {
 	arrowFuncPattern := regexp.MustCompile(`^(\s*)(const|let|var)\s+(\w+)\s*=\s*(async\s+)?\(`)
 	classPattern := regexp.MustCompile(`^(\s*)(export\s+)?(default\s+)?class\s+(\w+)`)
 	importPattern := regexp.MustCompile(`^import\s+`)
-	exportPattern := regexp.MustCompile(`^export\s+(default\s+)?`)
+	// exportPattern removed - unused
 
 	lang := "javascript"
 	if p.typescript {
@@ -617,7 +617,6 @@ func (p *HTMLParser) Parse(content []byte) ([]CodeBlock, error) {
 	lines := strings.Split(string(content), "\n")
 
 	// Patterns for HTML elements
-	tagPattern := regexp.MustCompile(`<(\w+)([^>]*)>`)
 	scriptPattern := regexp.MustCompile(`(?i)<script[^>]*>`)
 	stylePattern := regexp.MustCompile(`(?i)<style[^>]*>`)
 	templatePattern := regexp.MustCompile(`(?i)<template[^>]*>`)

@@ -21,11 +21,11 @@ SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;
 .print ""
 .print "=== TEST 2: Insert Raw File ==="
 
-INSERT INTO raw_files (id, source_path, mime_type, size, checksum, status)
-VALUES ('abc123', '/test/doc.pdf', 'application/pdf', 1024, 'abc123', 'pending');
+INSERT INTO raw_files (id, source_path, mime_type, size, external_path, checksum, status)
+VALUES ('abc123', '/test/doc.pdf', 'application/pdf', 1024, '/storage/raw/ab/abc123', 'abc123', 'pending');
 
-INSERT INTO raw_files (id, source_path, mime_type, size, checksum, status)
-VALUES ('def456', '/test/code.go', 'text/x-go', 512, 'def456', 'pending');
+INSERT INTO raw_files (id, source_path, mime_type, size, external_path, checksum, status)
+VALUES ('def456', '/test/code.go', 'text/x-go', 512, '/storage/raw/de/def456', 'def456', 'pending');
 
 SELECT id, source_path, mime_type, status FROM raw_files;
 
