@@ -1,22 +1,25 @@
 // Package db provides SQLite database operations for GoRAGlite.
 // Following the principle: Go = I/O, SQL = logique.
+//
+// HOROS Compliance:
+// - Uses modernc.org/sqlite (pure Go, no CGO)
+// - Embeds via assets/ package (no ".." in go:embed)
+// - Supports ATTACH/DETACH with defer pattern
 package db
 
 import (
 	"context"
 	"database/sql"
-	"embed"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
-)
+	_ "modernc.org/sqlite"
 
-//go:embed ../../sql/schema/*.sql
-var schemaFS embed.FS
+	"goraglite/assets"
+)
 
 // DB wraps a SQLite database connection with GoRAGlite-specific operations.
 type DB struct {
@@ -70,23 +73,11 @@ func Open(cfg Config) (*DB, error) {
 		return nil, fmt.Errorf("create db directory: %w", err)
 	}
 
-	// Build connection string
+	// Build connection string for modernc.org/sqlite
+	// Note: modernc uses different pragma syntax than mattn
 	dsn := cfg.Path
-	if cfg.WALMode {
-		dsn += "?_journal_mode=WAL"
-	}
-	if cfg.ForeignKeys {
-		if cfg.WALMode {
-			dsn += "&_foreign_keys=ON"
-		} else {
-			dsn += "?_foreign_keys=ON"
-		}
-	}
-	if cfg.BusyTimeout > 0 {
-		dsn += fmt.Sprintf("&_busy_timeout=%d", cfg.BusyTimeout.Milliseconds())
-	}
 
-	db, err := sql.Open("sqlite3", dsn)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
@@ -95,6 +86,26 @@ func Open(cfg Config) (*DB, error) {
 	db.SetMaxOpenConns(cfg.MaxOpenConns)
 	db.SetMaxIdleConns(cfg.MaxIdleConns)
 	db.SetConnMaxLifetime(cfg.ConnMaxLifetime)
+
+	// Set pragmas via SQL (modernc.org/sqlite style)
+	pragmas := []string{
+		"PRAGMA busy_timeout = " + fmt.Sprintf("%d", cfg.BusyTimeout.Milliseconds()),
+	}
+	if cfg.WALMode {
+		pragmas = append(pragmas, "PRAGMA journal_mode = WAL")
+	}
+	if cfg.ForeignKeys {
+		pragmas = append(pragmas, "PRAGMA foreign_keys = ON")
+	}
+	// HOROS required pragmas
+	pragmas = append(pragmas, "PRAGMA synchronous = NORMAL")
+
+	for _, pragma := range pragmas {
+		if _, err := db.Exec(pragma); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("set pragma %q: %w", pragma, err)
+		}
+	}
 
 	// Verify connection
 	if err := db.Ping(); err != nil {
@@ -164,8 +175,9 @@ func CreateRun(runsDir, runID string) (*DB, error) {
 
 // initSchema initializes the database with the embedded schema.
 func (db *DB) initSchema(schemaFile string) error {
-	schemaPath := fmt.Sprintf("../../sql/schema/%s", schemaFile)
-	schema, err := schemaFS.ReadFile(schemaPath)
+	// Use assets package (HOROS compliant - no ".." in embed path)
+	schemaPath := fmt.Sprintf("schema/%s", schemaFile)
+	schema, err := assets.SchemaFS.ReadFile(schemaPath)
 	if err != nil {
 		return fmt.Errorf("read schema %s: %w", schemaFile, err)
 	}
@@ -179,7 +191,7 @@ func (db *DB) initSchema(schemaFile string) error {
 }
 
 // Attach attaches another database with the given alias.
-// This is used by the merger to access run outputs.
+// HOROS pattern: Always use with defer Detach()
 func (db *DB) Attach(ctx context.Context, path, alias string) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -306,14 +318,14 @@ func (db *DB) SetConfig(ctx context.Context, key, value string) error {
 
 // Stats returns database statistics.
 type Stats struct {
-	Path        string
-	SizeBytes   int64
-	Tables      int
-	TotalRows   int64
-	WALSize     int64
-	PageSize    int
-	PageCount   int
-	FreePages   int
+	Path      string
+	SizeBytes int64
+	Tables    int
+	TotalRows int64
+	WALSize   int64
+	PageSize  int
+	PageCount int
+	FreePages int
 }
 
 // GetStats returns database statistics.
