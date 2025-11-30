@@ -113,21 +113,21 @@ func (e *XLSXExtractor) loadSharedStrings(reader *zip.Reader) ([]string, error) 
 		return nil, err
 	}
 
-	var strings []string
+	var result []string
 	for _, s := range ss.Strings {
 		if s.T != "" {
-			strings = append(strings, s.T)
+			result = append(result, s.T)
 		} else {
 			// Rich text
 			var builder strings.Builder
 			for _, run := range s.R {
 				builder.WriteString(run.T)
 			}
-			strings = append(strings, builder.String())
+			result = append(result, builder.String())
 		}
 	}
 
-	return strings, nil
+	return result, nil
 }
 
 // Worksheet XML structure

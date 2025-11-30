@@ -440,7 +440,8 @@ func (e *Engine) executeHash(ctx context.Context, runDB *db.DB, step *Step, sour
 
 	// SQLite doesn't have native hashing, so we use a simple approach
 	// Real implementation would use a custom function
-	cols := strings.Join(cfg.Columns, " || ")
+	// Note: cfg.Columns would be used with a proper hashing extension
+	_ = cfg.Columns // Mark as used for future implementation
 
 	query := fmt.Sprintf(`
 		CREATE TABLE %s AS

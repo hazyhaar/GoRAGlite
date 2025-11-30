@@ -14,11 +14,11 @@
 .read ../../sql/schema/corpus.sql
 
 -- Insert test files
-INSERT INTO raw_files (id, source_path, mime_type, size, checksum, status)
+INSERT INTO raw_files (id, source_path, mime_type, size, external_path, checksum, status)
 VALUES
-    ('file_001', '/docs/report.pdf', 'application/pdf', 10240, 'chk001', 'pending'),
-    ('file_002', '/docs/manual.pdf', 'application/pdf', 20480, 'chk002', 'pending'),
-    ('file_003', '/src/main.go', 'text/x-go', 2048, 'chk003', 'pending');
+    ('file_001', '/docs/report.pdf', 'application/pdf', 10240, '/storage/raw/fi/file_001', 'chk001', 'pending'),
+    ('file_002', '/docs/manual.pdf', 'application/pdf', 20480, '/storage/raw/fi/file_002', 'chk002', 'pending'),
+    ('file_003', '/src/main.go', 'text/x-go', 2048, '/storage/raw/fi/file_003', 'chk003', 'pending');
 
 .print "Created 3 test files"
 
