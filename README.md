@@ -1,345 +1,178 @@
 # GoRAGlite v2
 
-A SQLite-powered RAG (Retrieval-Augmented Generation) system built on a workflow architecture where every transformation is a table.
-
-## Philosophy
-
-> "Remplacer l'inférence opaque par des cascades de transformations SQL auditables."
-
-### Core Principles
-
-1. **Every transformation is a table** — No in-memory state. Each operation materializes its result.
-2. **Filters are data** — A cascade is an ordered list of stored predicates. Versionable, composable, diffable.
-3. **Active residual** — Each step calculates its delta vs the previous step. Divergence is signal, not noise.
-4. **Go = I/O, SQL = Logic** — Go handles file reading and external API calls; SQL handles all transformations.
+SQLite-powered RAG (Retrieval-Augmented Generation) system with workflow-based transformations.
 
 ## Architecture
 
 ```
-┌──────────────────────────────────────┐
-│            ORCHESTRATOR              │
-│  (decides what to process)           │
-└──────────────┬───────────────────────┘
-               │
-  ┌────────────┼────────────────┐
-  ▼            ▼                ▼
-┌──────────┐ ┌──────────┐ ┌──────────┐
-│ Worker 1 │ │ Worker 2 │ │ Worker N │
-│ run_a.db │ │ run_b.db │ │ run_n.db │
-└────┬─────┘ └────┬─────┘ └────┬─────┘
-     │            │            │
-     ▼            ▼            ▼
-┌──────────────────────────────────────┐
-│             QUEUE                     │
-│        runs/pending/*.db              │
-└──────────────────┬───────────────────┘
-                   │
-                   ▼
-        ┌──────────────────────┐
-        │       MERGER         │
-        │    (singleton)       │
-        │  sole writer to      │
-        │    corpus.db         │
-        └──────────┬───────────┘
-                   │
-                   ▼
-        ┌──────────────────────┐
-        │      corpus.db       │
-        │     (permanent)      │
-        └──────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                         GoRAGlite v2                            │
+├─────────────────────────────────────────────────────────────────┤
+│  CLI (cmd/raglite)                                              │
+│    init | ingest | process | search | status | workflows        │
+├─────────────────────────────────────────────────────────────────┤
+│  Orchestrator          │  Workflow Engine    │  Merger          │
+│  - file ingestion      │  - step execution   │  - sole writer   │
+│  - workflow selection  │  - delta tracking   │  - queue FIFO    │
+│  - search coordination │  - run isolation    │  - GC management │
+├─────────────────────────────────────────────────────────────────┤
+│  SQLite Databases                                               │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
+│  │  corpus.db   │  │ workflows.db │  │   run_*.db   │          │
+│  │  (permanent) │  │  (read-only) │  │  (ephemeral) │          │
+│  └──────────────┘  └──────────────┘  └──────────────┘          │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-### Database Topology
+### Design Principles
 
-```
-PERMANENT
-─────────
-corpus.db          The consolidated knowledge graph
-workflows.db       Workflow definitions
+- **One run = one database**: Each workflow execution creates an isolated `.db` file for easy cleanup
+- **Merger as sole writer**: Serialization guaranteed - only the merger writes to `corpus.db`
+- **Workflows are data**: SQL predicates stored in database, versionable and diffable
+- **Every step is a table**: No in-memory state, full auditability via `CREATE TABLE AS SELECT`
 
-TRANSIENT
-───────────
-runs/
-├── {run_id}.db    Worker workspace (ephemeral)
-└── ...
+## Implementation Status
 
-queue/
-├── pending/       Outputs awaiting merge
-├── processing/    Being merged (one at a time)
-├── done/          Archived
-└── failed/        Failures for inspection
-```
+| Component | Status | Notes |
+|-----------|--------|-------|
+| SQL Schemas | Complete | corpus, workflows, run templates |
+| Workflow Definitions | Complete | 12 workflows for PDF, DOCX, code (9 langs), search |
+| Workflow Engine | Complete | All operations: filter, project, join, aggregate, window, hash, vectorize, external |
+| Merger | Complete | Queue-based with retry, GC |
+| Extractors | Partial | PDF (pdftotext), DOCX (xml), XLSX (xml), Code (regex) |
+| Vectorization | Basic | Feature hashing + TF-IDF (no ML embeddings) |
+| CLI | Complete | All commands implemented |
+| Go Tests | Not implemented | SQL tests only |
+| Search | Basic | FTS5 only, no vector search |
+
+### Known Limitations
+
+- Vectorization uses feature hashing, not neural embeddings
+- Hash operation creates placeholder blobs (needs SQLite extension)
+- Window chunking is simplified (no semantic boundaries)
+- No concurrent worker support yet
 
 ## Installation
 
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/GoRAGlite.git
-cd GoRAGlite
+# Requirements
+go 1.21+
+sqlite3 (with FTS5)
+
+# For PDF extraction
+apt-get install poppler-utils  # pdftotext
 
 # Build
 go build -o raglite ./cmd/raglite
-
-# Initialize
-./raglite init
 ```
 
 ## Usage
 
-### Basic Commands
-
 ```bash
-# Initialize data directory
+# Initialize
 raglite init
 
 # Ingest files
 raglite ingest ./documents/
-raglite ingest ./code.go
-raglite ingest ./project/
+raglite ingest ./src/main.go
 
 # Process pending files
 raglite process
 
-# Search the corpus
-raglite search "how to handle HTTP errors"
-raglite search "function that parses JSON"
+# Search
+raglite search "error handling"
 
-# Show system status
+# Status
 raglite status
 
-# List available workflows
+# List workflows
 raglite workflows
 
-# Run a specific workflow
+# Run specific workflow
 raglite run pdf_chunking_v1
 
 # Inspect a run
-raglite inspect ./data/runs/run_xxx.db
+raglite inspect ~/.raglite/runs/run_xxx.db
 
-# Garbage collect old runs
-raglite gc
-raglite gc 24h  # Keep last 24 hours
-
-# Export data
-raglite export json > corpus.json
-raglite export csv > corpus.csv
+# Garbage collect
+raglite gc 72h
 ```
-
-## Supported Formats
-
-### Documents
-- **PDF** — via `pdftotext` (layout-aware extraction)
-- **DOCX** — native XML parsing (preserves styles, headings)
-- **XLSX** — cell-by-cell extraction with formulas
-
-### Code (Language-Aware Parsing)
-- **Go** — AST parsing (functions, types, interfaces)
-- **Python** — Function/class extraction with type hints
-- **JavaScript** — Functions, classes, arrow functions, modules
-- **TypeScript** — Type-aware with interfaces, generics
-- **Bash** — Function extraction, pipe detection
-- **SQL** — Statement-type classification
-- **HTML/HTMX** — Section extraction, htmx attribute detection
-- **Markdown** — Heading-based sections, code block preservation
-
-### Plain Text
-- Paragraph-based chunking with semantic boundaries
 
 ## Workflows
 
-Each workflow is a cascade of SQL transformations:
+Pre-defined workflows in `sql/workflows/`:
 
-```
-Input → Filter → Parse → Chunk → Features → Vectors → Output
-```
+| Workflow | File Types | Steps |
+|----------|-----------|-------|
+| `pdf_chunking_v1` | PDF | 12 (filter → extract → chunk → vectorize) |
+| `docx_chunking_v1` | DOCX | 13 |
+| `go_chunking_v1` | Go | 10 |
+| `python_chunking_v1` | Python | 10 |
+| `js_chunking_v1` | JavaScript | 10 |
+| `ts_chunking_v1` | TypeScript | 10 |
+| `bash_chunking_v1` | Bash | 10 |
+| `sql_chunking_v1` | SQL | 10 |
+| `html_chunking_v1` | HTML/HTMX | 10 |
+| `markdown_chunking_v1` | Markdown | 9 |
+| `text_chunking_v1` | Plain text | 8 |
+| `search_default_v1` | - | Multi-layer search |
 
-### Available Workflows
+## SQL Tests
 
-| Workflow | Description |
-|----------|-------------|
-| `pdf_chunking_v1` | PDF → text segments → chunks → vectors |
-| `docx_chunking_v1` | DOCX → structured paragraphs → chunks |
-| `go_chunking_v1` | Go code → AST blocks → code-aware vectors |
-| `python_chunking_v1` | Python → functions/classes → vectors |
-| `javascript_chunking_v1` | JS → functions/classes → vectors |
-| `typescript_chunking_v1` | TS → type-aware extraction |
-| `bash_chunking_v1` | Shell scripts → function blocks |
-| `sql_chunking_v1` | SQL → statement classification |
-| `html_chunking_v1` | HTML/HTMX → section extraction |
-| `markdown_chunking_v1` | Markdown → heading-based sections |
-| `text_chunking_v1` | Plain text → paragraph chunking |
-| `search_v1` | Multi-layer hybrid search |
-
-### Workflow Steps
-
-Each step is an atomic operation:
-
-| Operation | Description |
-|-----------|-------------|
-| `filter` | SQL WHERE clause |
-| `project` | SELECT columns |
-| `join` | Table joins |
-| `aggregate` | GROUP BY with functions |
-| `window` | Chunking/windowing |
-| `hash` | Content hashing |
-| `vectorize` | Vector generation |
-| `external` | Call external extractor |
-
-## Vectorization
-
-Vectors are built **without external APIs** using:
-
-### Layers
-
-1. **Structure** — Features like line count, code patterns, formatting density
-2. **Lexical** — TF-IDF on tokens/n-grams
-3. **Contextual** — Graph-based features (relations, co-occurrence)
-4. **Blend** — Weighted combination of layers
-
-### Feature Hashing
-
-```go
-// Features are hashed into fixed-dimension vectors
-features := map[string]float64{
-    "token_count": 150,
-    "has_function": 1.0,
-    "has_error_handling": 1.0,
-}
-vector := hasher.HashFeatures(features) // → [256]float32
-```
-
-## Search
-
-Search executes as a workflow cascade:
-
-```
-Query "function that handles HTTP errors"
-    ↓
-Step 1: Tokenize & expand query
-    ↓
-Step 2: FTS filter (chunks_fts MATCH tokens)
-    → 847 → 43 candidates
-    ↓
-Step 3: Structure score (cosine similarity)
-    → score per layer
-    ↓
-Step 4: Blend scores (weighted average)
-    ↓
-Step 5: Top-K filter
-    → 10 results
-```
-
-Each step is logged in `step_executions`. You can:
-- See why a chunk was eliminated
-- Compare two queries (diff cascades)
-- Optimize (which step eliminates most?)
-
-## Inspecting Runs
-
-Every run is its own SQLite database:
+Standalone tests runnable with `sqlite3`:
 
 ```bash
-# Open a run for inspection
-sqlite3 ./data/runs/run_xxx.db
-
-# See run summary
-SELECT * FROM _run_summary;
-
-# See step progression
-SELECT * FROM _step_progression;
-
-# See specific step output
-SELECT * FROM step_3_filtered LIMIT 10;
-
-# See what was eliminated
-SELECT * FROM delta_3;
+cd test/sql
+bash run_tests.sh
 ```
 
-## Configuration
+Tests validate:
+- Schema creation and constraints
+- Workflow loading and step counts
+- Run database template
+- End-to-end pipeline simulation
 
-### Data Directory Structure
-
-```
-~/.raglite/
-├── corpus.db           # Consolidated knowledge
-├── workflows.db        # Workflow definitions
-├── runs/               # Active run workspaces
-└── queue/
-    ├── pending/        # Completed runs awaiting merge
-    ├── done/           # Merged runs (for GC)
-    └── failed/         # Failed merges
-```
-
-### Environment Variables
-
-```bash
-RAGLITE_DATA_DIR=~/.raglite  # Data directory
-```
-
-## Development
-
-### Project Structure
+## Project Structure
 
 ```
-goraglite/
-├── cmd/raglite/           # CLI entry point
+GoRAGlite/
+├── cmd/raglite/          # CLI
 ├── internal/
-│   ├── db/                # SQLite wrapper
-│   ├── workflow/          # Workflow engine
-│   ├── merger/            # Merger component
-│   ├── orchestrator/      # Task orchestration
-│   ├── extract/           # File extractors
-│   └── vector/            # Vector operations
+│   ├── db/               # SQLite wrapper
+│   ├── workflow/         # Engine, loader, types
+│   ├── merger/           # Corpus integration
+│   ├── orchestrator/     # Coordination
+│   ├── extract/          # PDF, DOCX, XLSX, Code
+│   └── vector/           # Feature hashing, TF-IDF
 ├── sql/
-│   ├── schema/            # DDL for databases
-│   └── workflows/         # Built-in workflow definitions
-└── test/
-    ├── fixtures/          # Test files
-    └── workflows/         # Workflow tests
+│   ├── schema/           # Database schemas
+│   └── workflows/        # Workflow definitions
+└── test/sql/             # SQL tests
 ```
 
-### Adding a New Extractor
+## Database Schemas
 
-```go
-type MyExtractor struct{}
+### corpus.db
+- `raw_files`: Ingested files with status tracking
+- `chunks`: Text chunks with FTS5 index
+- `chunk_vectors`: Multi-layer vectors (BLOB)
+- `chunk_features`: Extracted features
+- `chunk_relations`: Graph relations
+- `run_history`: Audit trail
 
-func (e *MyExtractor) Name() string { return "myformat" }
-func (e *MyExtractor) Version() string { return "1.0.0" }
-func (e *MyExtractor) SupportedTypes() []string {
-    return []string{"application/x-myformat"}
-}
-func (e *MyExtractor) Extract(ctx context.Context, content []byte, config json.RawMessage) ([]Segment, error) {
-    // Parse content, return segments
-}
+### workflows.db
+- `workflows`: Workflow definitions
+- `workflow_steps`: Step definitions with predicates
+- `workflow_tags`: Categorization
+- `search_configs`: Search parameters
 
-// Register
-registry.Register(&MyExtractor{})
-```
-
-### Adding a New Workflow
-
-```sql
-INSERT INTO workflows (id, name, version, description, status)
-VALUES ('my_workflow_v1', 'My Workflow', 1, 'Description', 'active');
-
-INSERT INTO workflow_steps VALUES
-    ('my_workflow_v1', 1, 'step_name', 'filter', '_input',
-     'predicate', 'output_table', '{"config": "json"}', 0, 'continue');
-```
-
-## Guarantees
-
-| Property | Mechanism |
-|----------|-----------|
-| Determinism | Same input + same workflow = same output |
-| Traceability | Every decision = an intermediate table |
-| Isolation | One run = one file, zero side effects |
-| Atomicity | Transactional merge, automatic rollback |
-| Auditability | No black box, everything is inspectable SQL |
-| Reproducibility | Extractor + workflow versioning |
-| Resilience | Run crash doesn't affect corpus |
-| Scalability | Parallel workers, serialized merger |
+### run_*.db (ephemeral)
+- `_run_meta`: Run metadata
+- `_workflow_steps`: Copied steps
+- `_step_executions`: Execution log with deltas
+- `_output`: Final chunks
+- `_output_vectors`: Generated vectors
 
 ## License
 
-MIT License - See [LICENSE](LICENSE) for details.
+MIT
