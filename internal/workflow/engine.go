@@ -438,10 +438,10 @@ func (e *Engine) executeHash(ctx context.Context, runDB *db.DB, step *Step, sour
 		cfg.OutputColumn = "hash"
 	}
 
-	// SQLite doesn't have native hashing, so we use a simple approach
-	// Real implementation would use a custom function
-	// Note: cfg.Columns would be used with a proper hashing extension
-	_ = cfg.Columns // Mark as used for future implementation
+	// TODO: Implement column-based hashing using cfg.Columns with a proper hashing extension.
+	if len(cfg.Columns) > 0 {
+		return fmt.Errorf("column-based hashing is not yet implemented")
+	}
 
 	query := fmt.Sprintf(`
 		CREATE TABLE %s AS
